@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Model Evaluation</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+    <script src="https://cdn.socket.io/4.0.0/socket.io.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>LLM Model Evaluation</h1>
+        <form id="query-form">
+            <label for="query">Enter your query:</label>
+            <input type="text" id="query" name="query" required>
+            <button type="submit">Submit</button>
+        </form>
+        <div id="responses">
+            <h2>Responses</h2>
+            <div id="gpt3.5-response" class="response-block">
+                <h3>GPT-3.5-turbo:</h3>
+                <p></p>
+            </div>
+            <div id="gpt4-response" class="response-block">
+                <h3>GPT-4:</h3>
+                <p></p>
+            </div>
+            <div id="llama2-response" class="response-block">
+                <h3>Llama-2-70b-chat:</h3>
+                <p></p>
+            </div>
+            <div id="falcon-response" class="response-block">
+                <h3>Falcon-40b-instruct:</h3>
+                <p></p>
+            </div>
+            <div id="best-response" class="response-block">
+                <h3>Best Response:</h3>
+                <p></p>
+            </div>
+        </div>
+    </div>
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

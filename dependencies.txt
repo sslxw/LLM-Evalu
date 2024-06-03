@@ -1,0 +1,10 @@
+flask
+flask-socketio
+flask-cors
+requests
+beautifulsoup4
+PyPDF2
+faiss-cpu
+openai
+numpy
+replicate
