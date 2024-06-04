@@ -45,7 +45,9 @@ session.mount("http://", adapter)
 session.mount("https://", adapter)
 
 def get_embedding(text):
-    return embedding_model.encode(text, convert_to_tensor=True, device=device).cpu().numpy()
+    with torch.no_grad():
+        encoded_input = embedding_model.encode(text, convert_to_tensor=True, device=device)
+        return encoded_input.cpu().numpy()
 
 def scrape_site(url, visited_urls):
     if url in visited_urls:
