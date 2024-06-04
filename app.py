@@ -7,34 +7,31 @@ import faiss
 import numpy as np
 import requests
 from bs4 import BeautifulSoup
-from PyPDF2 import PdfReader
-from PyPDF2.errors import PdfReadError
-import io
 from urllib.parse import urljoin
 from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from sentence_transformers import SentenceTransformer
+import torch
 from sklearn.metrics.pairwise import cosine_similarity
-import os
-import pickle
 
 app = Flask(__name__)
 CORS(app)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
-openai.api_key = "KEY"
-replicate_api_token = 'KEY'
+print(torch.cuda.is_available())
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU found")
+
+openai.api_key = "API-KEY"
+replicate_api_token = 'API-KEY'
 
 replicate_client = replicate.Client(api_token=replicate_api_token)
 
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2').to(device)
 
-dimension = 384  
+dimension = 384
 indexing = faiss.IndexFlatL2(dimension)
-texts = []  
-
-texts_file = 'texts_cache.pkl'
-embeddings_file = 'embeddings_cache.pkl'
+texts = []
 
 session = requests.Session()
 retry = Retry(
@@ -48,95 +45,58 @@ session.mount("http://", adapter)
 session.mount("https://", adapter)
 
 def get_embedding(text):
-    return embedding_model.encode(text)
+    return embedding_model.encode(text, convert_to_tensor=True, device=device).cpu().numpy()
 
-def scrape_website(url):
+def scrape_site(url, visited_urls):
+    if url in visited_urls:
+        return []
+    visited_urls.add(url)
+    
+    print(f"Scraping: {url}")
     try:
         response = session.get(url, timeout=10)
         response.raise_for_status()
         soup = BeautifulSoup(response.content, 'html.parser')
-
-        texts = [p.get_text() for p in soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'tr', 'th', 'td', 'span', 'div', 'a', 'b', 'strong', 'i', 'em'])]
-
-        sub_page_links = [urljoin(url, a['href']) for a in soup.find_all('a', href=True) if 'http' not in a['href'] or url in a['href']]
-        for link in sub_page_links:
-            sub_page_texts = scrape_sub_page(link)
-            texts.extend(sub_page_texts)
-            
-        return texts
     except requests.exceptions.RequestException as e:
         print(f"Error scraping {url}: {e}")
         return []
-
-def scrape_sub_page(url):
-    try:
-        response = session.get(url, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, 'html.parser')
-
-        sub_page_texts = [p.get_text() for p in soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'tr', 'th', 'td', 'blockquote', 'span', 'div', 'a', 'b', 'strong', 'i', 'em'])]
-        
-        pdf_links = [urljoin(url, a['href']) for a in soup.find_all('a', href=True) if a['href'].endswith('.pdf')]
-        for pdf_link in pdf_links:
-            pdf_text = scrape_pdf(pdf_link)
-            sub_page_texts.append(pdf_text)
-            
-        return sub_page_texts
-    except requests.exceptions.RequestException as e:
-        print(f"Error scraping {url}: {e}")
-        return []
-
-def scrape_pdf(pdf_url):
-    try:
-        response = session.get(pdf_url, timeout=10)
-        response.raise_for_status()
-        with io.BytesIO(response.content) as open_pdf_file:
-            reader = PdfReader(open_pdf_file)
-            pdf_text = ""
-            for page_num in range(len(reader.pages)):
-                pdf_text += reader.pages[page_num].extract_text()
-            return pdf_text
-    except (requests.exceptions.RequestException, PdfReadError) as e:
-        print(f"Error scraping PDF {pdf_url}: {e}")
-        return ""
-
+    
+    page_texts = []
+    tags_to_scrape = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'tr', 'th', 'td', 'span', 'div', 'a', 'b', 'strong', 'i', 'em']
+    for tag in tags_to_scrape:
+        elements = soup.find_all(tag)
+        for element in elements:
+            text = element.get_text().strip()
+            if text:
+                page_texts.append(text)
+    
+    links = [urljoin(url, link['href']) for link in soup.find_all('a', href=True)]
+    for link in links:
+        if link.startswith("https://u.ae/en/information-and-services"):
+            page_texts.extend(scrape_site(link, visited_urls))
+    
+    return page_texts
 
 def setup_vector_db():
     global texts, indexing
-    # we check if we already cached the data
-    if os.path.exists(texts_file) and os.path.exists(embeddings_file):
-        with open(texts_file, 'rb') as tf, open(embeddings_file, 'rb') as ef:
-            texts = pickle.load(tf)
-            embeddings = pickle.load(ef)
-        print("Loaded texts and embeddings from cache.")
-    else:
-        # scraping the data and creating embeddings
-        urls = [
-            "https://u.ae/en/information-and-services",
-            "https://u.ae/en/information-and-services/visa-and-emirates-id",
-            "https://u.ae/en/information-and-services/visa-and-emirates-id/residence-visas",
-            "https://u.ae/en/information-and-services/visa-and-emirates-id/residence-visas/golden-visa"
-        ]
-        for url in urls:
-            texts.extend(scrape_website(url))
-        
-        if not texts:
-            print("No texts scraped from the websites.")
-            return
+    urls = [
+        "https://u.ae/en/information-and-services",
+    ]
+    visited_urls = set()
+    for url in urls:
+        texts.extend(scrape_site(url, visited_urls))
+    
+    if not texts:
+        print("No texts scraped from the websites.")
+        return
 
-        print(f"Scraped {len(texts)} texts.")
-        embeddings = np.array([get_embedding(text) for text in texts])
+    print(f"Scraped {len(texts)} texts.")
+    embeddings = np.array([get_embedding(text) for text in texts])
 
-        if embeddings.ndim != 2 or embeddings.shape[1] != dimension:
-            print(f"Embeddings shape is not correct: {embeddings.shape}")
-            return
-        
-        # i saved the texts and embeddings to cache to save time 
-        with open(texts_file, 'wb') as tf, open(embeddings_file, 'wb') as ef:
-            pickle.dump(texts, tf)
-            pickle.dump(embeddings, ef)
-        print("Saved texts and embeddings to cache.")
-
+    if embeddings.ndim != 2 or embeddings.shape[1] != dimension:
+        print(f"Embeddings shape is not correct: {embeddings.shape}")
+        return
+    
     indexing.add(embeddings)
     print(f"Vector database setup complete with {indexing.ntotal} embeddings.")
 
@@ -194,12 +154,11 @@ def query_llms(prompt, relevant_texts):
     }, relevant_texts)
     socketio.emit('best_response', {'response': best_response})
 
-
 def query_gpt35(prompt):
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo-16k-0613",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant that only answers to questions that relate to the search results given if it doesnt pertain it apologize and dont answer."},
+            {"role": "system", "content": "You are a helpful assistant that only answers to questions that relate to the search results given. If it doesn't pertain, apologize and don't answer."},
             {"role": "user", "content": prompt}
         ],
         max_tokens=150
@@ -210,7 +169,7 @@ def query_gpt4(prompt):
     response = openai.ChatCompletion.create(
         model="gpt-4",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant that only answers to questions that relate to the search results given if it doesnt pertain it apologize and dont answer."},
+            {"role": "system", "content": "You are a helpful assistant that only answers to questions that relate to the search results given. If it doesn't pertain, apologize and don't answer."},
             {"role": "user", "content": prompt}
         ],
         max_tokens=150
@@ -239,17 +198,12 @@ def query_falcon(prompt):
     return result
 
 def evaluate_responses(responses, relevant_texts):
-    # we compute embeddings for relevant texts
     relevant_embeddings = np.array([get_embedding(text) for text in relevant_texts])
-    
-    # we compute the average cosine similarity of each model to the relevant texts
     similarities = {}
     for model, response in responses.items():
         response_embedding = get_embedding(response)
         cos_sim = cosine_similarity([response_embedding], relevant_embeddings).mean()
         similarities[model] = cos_sim
-
-    # we then find the model with the highest average cosine similarity
     best_model = max(similarities, key=similarities.get)
     return f"Best response by {best_model}: {responses[best_model]}"
 
