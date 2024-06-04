@@ -12,6 +12,9 @@ from requests.adapters import HTTPAdapter
 from urllib3.util import Retry
 from sentence_transformers import SentenceTransformer
 import torch
+import time
+import pickle
+import os
 from sklearn.metrics.pairwise import cosine_similarity
 
 app = Flask(__name__)
@@ -44,12 +47,29 @@ adapter = HTTPAdapter(max_retries=retry)
 session.mount("http://", adapter)
 session.mount("https://", adapter)
 
-def get_embedding(text):
-    with torch.no_grad():
-        encoded_input = embedding_model.encode(text, convert_to_tensor=True, device=device)
-        return encoded_input.cpu().numpy()
+def get_embeddings(texts):
+    batch_size = 64 
+    embeddings = []
 
-def scrape_site(url, visited_urls):
+    with torch.no_grad():
+        for i in range(0, len(texts), batch_size):
+            batch_texts = texts[i:i + batch_size]
+            encoded_inputs = embedding_model.encode(batch_texts, convert_to_tensor=True, device=device)
+            embeddings.append(encoded_inputs.cpu().numpy())
+    
+    return np.vstack(embeddings)
+
+def save_embeddings(texts, embeddings, file_path='embeddings_cache.pkl'):
+    with open(file_path, 'wb') as f:
+        pickle.dump((texts, embeddings), f)
+
+def load_embeddings(file_path='embeddings_cache.pkl'):
+    if os.path.exists(file_path):
+        with open(file_path, 'rb') as f:
+            return pickle.load(f)
+    return [], None
+
+def scrape_site(url, visited_urls, start_time, timeout, urls):
     if url in visited_urls:
         return []
     visited_urls.add(url)
@@ -75,29 +95,48 @@ def scrape_site(url, visited_urls):
     links = [urljoin(url, link['href']) for link in soup.find_all('a', href=True)]
     for link in links:
         if link.startswith("https://u.ae/en/information-and-services"):
-            page_texts.extend(scrape_site(link, visited_urls))
+            if (time.time() - start_time) > timeout:
+                print("Scraping timed out. Moving to next URL.")
+                return page_texts
+            page_texts.extend(scrape_site(link, visited_urls, start_time, timeout, urls))
     
     return page_texts
 
 def setup_vector_db():
     global texts, indexing
-    urls = [
-        "https://u.ae/en/information-and-services",
-    ]
-    visited_urls = set()
-    for url in urls:
-        texts.extend(scrape_site(url, visited_urls))
+    cache_file = 'embeddings_cache.pkl'
+    texts, embeddings = load_embeddings(cache_file)
     
-    if not texts:
-        print("No texts scraped from the websites.")
-        return
+    if texts is None or embeddings is None:
+        print("No cache found. Starting scraping and embedding process.")
+        urls = [
+            "https://u.ae/en/information-and-services",
+        ]
+        visited_urls = set()
+        start_time = time.time()
+        timeout = 1200
 
-    print(f"Scraped {len(texts)} texts.")
-    embeddings = np.array([get_embedding(text) for text in texts])
+        for url in urls:
+            texts.extend(scrape_site(url, visited_urls, start_time, timeout, urls))
+            if (time.time() - start_time) > timeout:
+                print("Scraping process timed out. Moving to next URL.")
+                start_time = time.time()  
+        
+        if not texts:
+            print("No texts scraped from the websites.")
+            return
 
-    if embeddings.ndim != 2 or embeddings.shape[1] != dimension:
-        print(f"Embeddings shape is not correct: {embeddings.shape}")
-        return
+        print(f"Scraped {len(texts)} texts.")
+        embeddings = get_embeddings(texts)
+
+        if embeddings.ndim != 2 or embeddings.shape[1] != dimension:
+            print(f"Embeddings shape is not correct: {embeddings.shape}")
+            return
+        
+        save_embeddings(texts, embeddings, cache_file)
+        print("Embeddings saved to cache.")
+    else:
+        print("Loaded embeddings from cache.")
     
     indexing.add(embeddings)
     print(f"Vector database setup complete with {indexing.ntotal} embeddings.")
@@ -106,9 +145,9 @@ setup_vector_db()
 
 def get_relevant_texts(query):
     global indexing, texts
-    query_embedding = get_embedding(query).astype('float32')
+    query_embedding = get_embeddings([query]).astype('float32')
     print(f"Query embedding shape: {query_embedding.shape}")
-    D, I = indexing.search(np.array([query_embedding]), 5)
+    D, I = indexing.search(query_embedding, 5)
     print(f"FAISS search results - Distances: {D}, Indices: {I}")
 
     relevant_indices = I[0]
@@ -200,11 +239,11 @@ def query_falcon(prompt):
     return result
 
 def evaluate_responses(responses, relevant_texts):
-    relevant_embeddings = np.array([get_embedding(text) for text in relevant_texts])
+    relevant_embeddings = get_embeddings(relevant_texts)
     similarities = {}
     for model, response in responses.items():
-        response_embedding = get_embedding(response)
-        cos_sim = cosine_similarity([response_embedding], relevant_embeddings).mean()
+        response_embedding = get_embeddings([response])
+        cos_sim = cosine_similarity(response_embedding, relevant_embeddings).mean()
         similarities[model] = cos_sim
     best_model = max(similarities, key=similarities.get)
     return f"Best response by {best_model}: {responses[best_model]}"
