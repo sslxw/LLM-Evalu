@@ -8,8 +8,6 @@ import numpy as np
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
-from requests.adapters import HTTPAdapter
-from urllib3.util import Retry
 from sentence_transformers import SentenceTransformer
 import torch
 import time
@@ -37,15 +35,6 @@ indexing = faiss.IndexFlatL2(dimension)
 texts = []
 
 session = requests.Session()
-retry = Retry(
-    total=5,
-    backoff_factor=1,
-    status_forcelist=[429, 500, 502, 503, 504],
-    allowed_methods=["HEAD", "GET", "OPTIONS"]
-)
-adapter = HTTPAdapter(max_retries=retry)
-session.mount("http://", adapter)
-session.mount("https://", adapter)
 
 def get_embeddings(texts):
     batch_size = 64 
@@ -84,7 +73,7 @@ def scrape_site(url, visited_urls, start_time, timeout, urls):
         return []
     
     page_texts = []
-    tags_to_scrape = ['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'table', 'tr', 'th', 'td', 'span', 'div', 'a', 'b', 'strong', 'i', 'em']
+    tags_to_scrape = ['p']
     for tag in tags_to_scrape:
         elements = soup.find_all(tag)
         for element in elements:
@@ -107,14 +96,14 @@ def setup_vector_db():
     cache_file = 'embeddings_cache.pkl'
     texts, embeddings = load_embeddings(cache_file)
     
-    if texts is None or embeddings is None:
+    if not texts or embeddings is None:
         print("No cache found. Starting scraping and embedding process.")
         urls = [
             "https://u.ae/en/information-and-services",
         ]
         visited_urls = set()
         start_time = time.time()
-        timeout = 1200
+        timeout = 10
 
         for url in urls:
             texts.extend(scrape_site(url, visited_urls, start_time, timeout, urls))
@@ -139,7 +128,7 @@ def setup_vector_db():
         print("Loaded embeddings from cache.")
     
     indexing.add(embeddings)
-    print(f"Vector database setup complete with {indexing.ntotal} embeddings.")
+    print(f"Vector database setup complete.")
 
 setup_vector_db()
 
@@ -169,8 +158,7 @@ def handle_new_query(data):
     user_query = data['query']
     print(f"Received new query: {user_query}")
     relevant_texts = get_relevant_texts(user_query)
-    new_prompt = f"Search results: {relevant_texts}\nUser query: {user_query} (Only answer from the search results)"
-    
+    new_prompt = f"Search results: {relevant_texts}\nUser query: {user_query} (Only answer if it pertains to the search results)"
     socketio.start_background_task(target=query_llms, prompt=new_prompt, relevant_texts=relevant_texts)
 
 def query_llms(prompt, relevant_texts):
@@ -199,7 +187,7 @@ def query_gpt35(prompt):
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo-16k-0613",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant that only answers to questions that relate to the search results given. If it doesn't pertain, apologize and don't answer."},
+            {"role": "system", "content": "You are a helpful assistant that only answers to questions that relate to the search results given."},
             {"role": "user", "content": prompt}
         ],
         max_tokens=150
@@ -210,24 +198,19 @@ def query_gpt4(prompt):
     response = openai.ChatCompletion.create(
         model="gpt-4",
         messages=[
-            {"role": "system", "content": "You are a helpful assistant that only answers to questions that relate to the search results given. If it doesn't pertain, apologize and don't answer."},
+            {"role": "system", "content": "You are a helpful assistant that only answers to questions that relate to the search results given."},
             {"role": "user", "content": prompt}
         ],
         max_tokens=150
     )
     return response['choices'][0]['message']['content']
 
-def clean_response(response):
-    cleaned_response = response.replace(", ", " ").replace(",", " ")
-    cleaned_response = " ".join(cleaned_response.split())
-    return cleaned_response
-
 def query_llama2(prompt):
     output = replicate_client.run(
         "meta/llama-2-7b-chat",
         input={"prompt": prompt}
     )
-    result = clean_response("".join(output))
+    result = "".join(output)
     return result
 
 def query_falcon(prompt):
@@ -235,7 +218,7 @@ def query_falcon(prompt):
         "joehoover/falcon-40b-instruct:7d58d6bddc53c23fa451c403b2b5373b1e0fa094e4e0d1b98c3d02931aa07173",
         input={"prompt": prompt}
     )
-    result = clean_response("".join(output))
+    result = "".join(output)
     return result
 
 def evaluate_responses(responses, relevant_texts):
