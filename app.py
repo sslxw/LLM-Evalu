@@ -169,7 +169,7 @@ def handle_new_query(data):
     user_query = data['query']
     print(f"Received new query: {user_query}")
     relevant_texts = get_relevant_texts(user_query)
-    new_prompt = f"Search results: {relevant_texts}\nUser query: {user_query} (Do not answer if query does not relate to the search results)"
+    new_prompt = f"Search results: {relevant_texts}\nUser query: {user_query} (Only answer from the search results)"
     
     socketio.start_background_task(target=query_llms, prompt=new_prompt, relevant_texts=relevant_texts)
 
